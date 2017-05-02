@@ -34,9 +34,10 @@
 #define BUF_SIZE   (1024)
 
 #define MAX_PAYLOAD     (256)
-#define NETLINK_DAC 22
+#define NETLINK_DAC 25
 #define MAX_CLIENT  64
-#define DHCP_PATH "/tmp/dhcp.leases"
+#define DHCP_LEASES_PATH "/tmp/dhcp.leases"
+#define ARP_PROC_PATH	"/proc/net/arp"
 #define BR_NAME "br-lan"
 
 typedef int (*get_info) (int fd, struct ifreq ifr, void *ctx);

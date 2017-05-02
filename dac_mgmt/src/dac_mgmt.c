@@ -81,10 +81,9 @@ static int get_iface_info(char *ifname, void *ctx, get_info get_info_func)
     return 0;
 }
 
-
-static int get_remote_server_info()
+static int get_dhcp_list(struct sockaddr_in br_netmask, int br_subnet)
 {
-    FILE *fp = NULL;
+	FILE *fp = NULL;
     char line_buf[256] = {0};
     char dummy1[32] = {0};
     char dummy2[32] = {0};
@@ -92,25 +91,15 @@ static int get_remote_server_info()
     char mac_str[32] = {0};
     char ip[32] = {0};
     unsigned char mac[6] = {0};
-
-    struct sockaddr_in br_netmask;
-    struct sockaddr_in br_ip;
-    int br_subnet = 0;
-
-    fp = fopen(DHCP_PATH, "r");
+	
+	fp = fopen(DHCP_LEASES_PATH, "r");
     if (!fp)
     {
-        DAC_ERR("Open %s failed\n", DHCP_PATH);
+        DAC_ERR("Open %s failed\n", DHCP_LEASES_PATH);
         return -1;
     }
 
-    get_iface_info(BR_NAME, &br_ip, get_ip);
-    get_iface_info(BR_NAME, &br_netmask, get_netmask);
-    br_subnet = (br_ip.sin_addr.s_addr & br_netmask.sin_addr.s_addr);
-
-    memset(re_srv_list, 0, sizeof(re_srv_list));
-    re_srv_num = 0;
-    while (fgets(line_buf, sizeof(line_buf), fp) != NULL)
+	while (fgets(line_buf, sizeof(line_buf), fp) != NULL)
     {
         memset(mac_str, 0, sizeof(mac_str));
         memset(mac, 0, sizeof(mac));
@@ -132,6 +121,95 @@ static int get_remote_server_info()
     }
 
     fclose(fp);
+	return 0;
+}
+
+static int get_arp_list(struct sockaddr_in br_netmask, int br_subnet)
+{
+	FILE *fp = NULL;
+	int i = 0;
+    char line_buf[256] = {0};
+    char dummy1[32] = {0};
+    char dummy2[32] = {0};
+    char dummy3[32] = {0};
+	char dummy4[32] = {0};
+    char mac_str[32] = {0};
+    char ip[32] = {0};
+    unsigned char mac[6] = {0};
+	int duplicated = 0;
+	
+	fp = fopen(ARP_PROC_PATH, "r");
+	if (!fp)
+	{
+		DAC_ERR("Open %s failed\n", DHCP_LEASES_PATH);
+        return -1;
+	}
+	
+	while (fgets(line_buf, sizeof(line_buf), fp) != NULL)
+    {
+		duplicated = 0;
+        memset(mac_str, 0, sizeof(mac_str));
+        memset(mac, 0, sizeof(mac));
+        memset(ip, 0, sizeof(ip));
+        if (sscanf(line_buf, "%s %s %s %s %s %s", ip, dummy1, 
+						dummy2, mac_str, dummy3, dummy4) != 6)
+        {
+			continue;
+        }
+		
+		for (i = 0; i < re_srv_num; i++)
+		{
+			if (inet_addr(ip) == re_srv_list[i].ip_addr)
+			{
+				duplicated = 1;
+				break;
+			}
+		}
+
+		if (!duplicated && (inet_addr(ip) & br_netmask.sin_addr.s_addr) == br_subnet)
+	    {
+            sscanf(mac_str, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
+                &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+            memcpy(re_srv_list[re_srv_num].mac_addr, mac, sizeof(mac));
+
+            re_srv_list[re_srv_num].ip_addr = inet_addr(ip);
+            re_srv_num++;
+            if (re_srv_num >= MAX_CLIENT)
+            {
+                break;
+            }        
+		}
+    }
+	fclose(fp);	
+	return 0;
+}
+
+static void init_re_srv_list()
+{
+    memset(re_srv_list, 0, sizeof(re_srv_list));
+    re_srv_num = 0;
+}
+
+static int get_remote_server_info()
+{
+    struct sockaddr_in br_netmask;
+    struct sockaddr_in br_ip;
+    int br_subnet = 0;
+
+	get_iface_info(BR_NAME, &br_ip, get_ip);
+    get_iface_info(BR_NAME, &br_netmask, get_netmask);
+    br_subnet = (br_ip.sin_addr.s_addr & br_netmask.sin_addr.s_addr);
+
+	init_re_srv_list();
+#if 0
+	get_dhcp_list(br_netmask, br_subnet);
+	get_arp_list(br_netmask, br_subnet);
+#else
+	unsigned char mac[6] = {0x00, 0x02, 0x00, 0x00, 0x8f, 0x51};
+	re_srv_list[re_srv_num].ip_addr = inet_addr("192.168.10.36");
+	memcpy(re_srv_list[re_srv_num].mac_addr, mac, sizeof(mac));
+	re_srv_num++;
+#endif
     return 0;
 }
 
@@ -254,16 +332,42 @@ static int connect_remote_server()
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(CTL_PORT);
-
         addr.sin_addr.s_addr = re_srv_list[i].ip_addr;
         DAC_INFO("--> %s Try to connect %s ...\n", get_time(), inet_ntoa(addr.sin_addr));
 
         ret = connect(re_srv_list[i].sock_fd, (struct sockaddr *)&addr, sizeof(struct sockaddr_in));
         if (ret < 0)
         {
-            DAC_ERR("--> %s Connect to remote server: %s failed!\n", get_time(), inet_ntoa(addr.sin_addr));
-            if (re_srv_list[i].sock_fd != -1)
+			int connected = 0, error = -1, slen = sizeof(int);
+			struct timeval tm;
+			fd_set set;
+			
+			if (errno != EINPROGRESS)
+			{
+				connected = 0;		  
+			}
+			else
+			{
+				DAC_INFO("--> %s Connecting to remote server: %s \n", get_time(), inet_ntoa(addr.sin_addr));
+				tm.tv_sec  = 0;
+	            tm.tv_usec = 10000;
+	            FD_ZERO(&set);
+	            FD_SET(re_srv_list[i].sock_fd, &set);
+
+	            if (select(re_srv_list[i].sock_fd + 1, NULL, &set, NULL, &tm) > 0)
+	            {
+	                getsockopt(re_srv_list[i].sock_fd, SOL_SOCKET, SO_ERROR, &error, (socklen_t *)&slen);
+					connected = (error == 0) ? 1 : 0;
+	            }
+	            else
+	            {
+	                connected = 0;
+	            }
+			}
+			
+            if (re_srv_list[i].sock_fd != -1 || !connected)
             {
+				DAC_ERR("--> %s Connect to remote server: %s failed!\n", get_time(), inet_ntoa(addr.sin_addr));
                 close(re_srv_list[i].sock_fd);
                 re_srv_list[i].sock_fd = -1;
             }
@@ -512,8 +616,6 @@ int main(int argc, char **argv)
         DAC_ERR("init server failed\n");
         return -1;
     }
-
-    signal(SIGCHLD, SIG_IGN);
 
     while (1)
     {

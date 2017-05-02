@@ -23,7 +23,7 @@ struct target_dev {
 #define AUDIO_PORT 15004
 #define ALARM_SEND_PORT 20300
 #define ALARM_RCV_PORT 20302
-#define NETLINK_DAC 22
+#define NETLINK_DAC 25
 
 
 #endif
